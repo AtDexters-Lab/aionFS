@@ -94,10 +94,17 @@ State is stored at `<data-dir>/state.json`. The server uses coarse locking and r
 
 ## Token File Example
 
+Create one with the helper script:
+
+```bash
+scripts/gen-token.sh  # writes tokens.json and prints the token to stdout
+```
+
+Result (`tokens.json`):
+
 ```json
 {
-  "secrettoken123": "service:demo",
-  "admin-token": "admin:ops"
+  "secrettoken123": "service:demo"
 }
 ```
 
@@ -111,3 +118,17 @@ Clients send `Authorization: Bearer secrettoken123` with each request; the serve
 - `GET /v1/checkpoints` lists checkpoint manifests visible to the caller.
 
 These endpoints are metadata-only today; no actual data copy occurs, but they unblock Piccolod integration flows.
+
+## Container Image
+
+A multi-stage `Dockerfile` is provided and works with Podman or Docker:
+
+```bash
+make container IMAGE=aionfs-devd:dev
+```
+
+By default the container runs `aionfs-devd -data-dir /var/lib/aionfs`. Mount that path to retain state between restarts.
+
+## Published Images
+
+When releases are tagged, the CI pipeline pushes multi-architecture images to GitHub Container Registry under `ghcr.io/<org>/aionfs-devd`. Pull with Podman/Docker and mount your data/token/cert volumes as needed.
