@@ -363,14 +363,10 @@ type createSnapshotRequest struct {
 	Note string `json:"note,omitempty"`
 }
 
-type snapshotResponse store.Snapshot
-
 type createCheckpointRequest struct {
 	VolumeIDs []string `json:"volume_ids"`
 	Note      string   `json:"note,omitempty"`
 }
-
-type checkpointResponse store.Checkpoint
 
 func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	volumeID := chi.URLParam(r, "volumeID")
