@@ -30,6 +30,59 @@
   - `Event Stream`: structured events over SSE/WebSocket (`volume.created`, `attach.denied`, `peer.unreachable`).
   - `Maintenance Jobs`: background disk health scans (SMART/NVMe), shard scrubbing, cache eviction, and rebalance tasks.
 
+## Node State, Portability & Disk Identity
+- Goals
+  - Entire AionFS node state is portable: backup, move, and restore on any host without depending on host-specific device naming.
+  - Disks managed by AionFS are re-identified by AionFS itself, not by OS paths or udev aliases, so `/dev/sdX` or `/dev/nvmeY` renumbering is harmless.
+  - Secrets remain protected yet recoverable: default dual-wrapping with TPM sealing when available plus an operator recovery passphrase or external directory key.
+
+- State Surface (single mount inside the container)
+  - Default path: `/var/lib/aionfs` (bind a durable volume here).
+  - Contents (illustrative):
+    - `state.db` (SQLite + WAL): federations, nodes, volumes, shards, targets, policies, audit.
+    - `vault/` (sealed secrets): node certs, join tokens, recovery keys; dual-wrapped `tpm.sealed` + `recovery.enc`.
+    - `manifests/` and `checkpoints/`: local copies of checkpoint manifests and capsule metadata.
+    - `targets/`: cache of storage target probes and fingerprints.
+    - `logs/`, `events/` (optional): rolling archives for troubleshooting.
+  - This directory is the only required backup for node state; data payload lives on disks as shards.
+
+- Backups & Restore
+  - Online export: `aionfsctl state export --out aionfs-state-v1.tar.zst` performs a WAL checkpoint, quiesces schema migrations, and snapshots `state.db`, `vault/`, and metadata subtrees.
+  - Import: `aionfsctl state import --in aionfs-state-v1.tar.zst` restores files, rehydrates vault, and triggers a rescan of attached disks.
+  - Cold copy is also valid when the daemon is stopped. For online backups taken by external tooling, use `POST /v1/state/snapshot` to freeze and `POST /v1/state/unfreeze` to resume.
+
+- Disk/Target Identity (host-OS independent)
+  - AionFS assigns a stable `target_id` per admitted storage target and writes an AionFS superblock label to the device/partition:
+    - Superblock fields: `magic`, `version`, `target_uuid`, `created_at`, `last_seen`, `node_id_at_onboarding`, `hw_fingerprint_set`, and optional `luks_uuid`/`fs_uuid` anchors.
+    - Location: first safe metadata region (end-of-disk guard by default, fallback to first MiB on empty devices). Redundant copy stored to a secondary offset.
+  - Probe order when discovering devices after a move/restore:
+    1) Scan block devices; for each, read AionFS superblock. If present and authentic, map directly to `target_id`.
+    2) If no superblock, derive a hardware fingerprint using controller-level identifiers via direct ioctls (not udev):
+       - NVMe: Controller/Namespace Identify → `serial`, `eui64`/`nguid`.
+       - SATA/SAS/SCSI: INQUIRY VPD pages 0x80/0x83 → `unit serial` and `wwn`.
+       - USB: device serial tuple when exposed by the bridge.
+       Canonicalize and hash (BLAKE3) into `hw_fp`. Match against `hw_fingerprint_set` captured at onboarding.
+    3) Validate by reading the expected `luks_uuid` or partition table GUIDs when encryption/partitioning is used.
+  - Onboarding path (`POST /v1/storage-targets`):
+    - Generate a random `target_uuid` (v4), capture the `hw_fingerprint_set`, write superblock(s), and persist mapping to `state.db`.
+    - If encryption is enabled, label the container `LUKS2` name as `AIONFS:<target_uuid>` and record its `luks_uuid`.
+  - Safety against clones: if two devices present the same superblock (e.g., byte-for-byte clones), AionFS flags `target.duplicate` and requires operator selection before use.
+
+- Cross‑Machine Restore Example
+  1) Operator attaches three disks to a new host and mounts the prior node’s state volume at `/var/lib/aionfs`.
+  2) Start AionFS. The daemon restores node identity from `vault/`, joins the federation, and scans block devices.
+  3) For each disk, the superblock reveals `target_uuid` → the daemon reconstructs the shard/placement maps from `state.db` and on‑disk anchors.
+  4) Volumes transition to `degraded` or `healthy` based on shard quorum; replication/repair proceeds automatically per policy.
+
+- Security
+  - Dual-wrap by default: all critical keys are sealed to TPM when available and also wrapped with an operator recovery secret (or directory-managed key). Either unwrap path restores state.
+  - State exports can be `--redact-secrets` to omit private keys and include only CSR material to re-issue certs from a directory.
+
+- Operational Interfaces (preview)
+  - `POST /v1/state/export` and `POST /v1/state/import` for automation-friendly backups and restores.
+  - `POST /v1/state/snapshot` / `POST /v1/state/unfreeze` to coordinate external snapshot tools.
+  - `POST /v1/storage-targets/probe` to dump current superblock and hardware fingerprints for diagnostics.
+
 ## Domain Model Snapshot
 | Object | Key Fields | Notes |
 | --- | --- | --- |
@@ -166,4 +219,3 @@ Authorization: Bearer <token>
 - Implement the erasure coding engine using https://github.com/klauspost/reedsolomon (Go-optimized Reed-Solomon) and define the streaming chunk format.
 - Define precise cache eviction strategy (LRU vs. LFU) and cache coherency for multi-producer workloads.
 - Specify external directory API (for Piccolospace) to harmonize credential issuance and peer discovery.
-
